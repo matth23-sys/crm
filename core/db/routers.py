@@ -1,35 +1,90 @@
-# backend/core/db/routers.py
-
 from __future__ import annotations
 
 from django.conf import settings
 
-from .exceptions import TenantContextMissingError
-from .tenant_context import get_current_tenant_alias
+from .tenant_context import get_current_tenant_db_alias
 
 
-class PlatformTenantRouter:
+class MultiTenantDatabaseRouter:
     """
-    Router principal del proyecto.
-
-    Reglas:
-    - apps de plataforma -> default
-    - apps tenant -> alias del tenant activo
-    - sin tenant activo -> error si strict routing está activado
+    Platform apps -> default/platform DB
+    Tenant apps   -> current tenant DB alias
     """
+
+    DEFAULT_PLATFORM_SYSTEM_APP_LABELS = {
+        "admin",
+        "auth",
+        "contenttypes",
+        "sessions",
+    }
+
+    def _platform_alias(self) -> str:
+        return settings.MULTI_TENANCY_PLATFORM_DB_ALIAS
+
+    def _platform_labels(self) -> set[str]:
+        return set(getattr(settings, "PLATFORM_APP_LABELS", set())) | set(
+            getattr(
+                settings,
+                "MULTI_TENANCY_PLATFORM_SYSTEM_APP_LABELS",
+                self.DEFAULT_PLATFORM_SYSTEM_APP_LABELS,
+            )
+        )
+
+    def _tenant_labels(self) -> set[str]:
+        return set(getattr(settings, "TENANT_APP_LABELS", set()))
+
+    def _tenant_prefix(self) -> str:
+        return settings.MULTI_TENANCY_TENANT_DB_ALIAS_PREFIX
+
+    def _is_platform_app(self, app_label: str) -> bool:
+        return app_label in self._platform_labels()
+
+    def _is_tenant_app(self, app_label: str) -> bool:
+        return app_label in self._tenant_labels()
+
+    def _instance_db(self, hints: dict) -> str | None:
+        instance = hints.get("instance")
+        if instance is not None and getattr(instance._state, "db", None):
+            return instance._state.db
+        return None
+
+    def _resolve_tenant_alias(self) -> str | None:
+        required = getattr(settings, "MULTI_TENANCY_STRICT_ROUTING", True)
+        return get_current_tenant_db_alias(required=required)
 
     def db_for_read(self, model, **hints):
-        return self._route_model(model)
+        sticky_db = self._instance_db(hints)
+        if sticky_db:
+            return sticky_db
+
+        app_label = model._meta.app_label
+
+        if self._is_platform_app(app_label):
+            return self._platform_alias()
+
+        if self._is_tenant_app(app_label):
+            return self._resolve_tenant_alias()
+
+        return self._platform_alias()
 
     def db_for_write(self, model, **hints):
-        return self._route_model(model)
+        sticky_db = self._instance_db(hints)
+        if sticky_db:
+            return sticky_db
+
+        app_label = model._meta.app_label
+
+        if self._is_platform_app(app_label):
+            return self._platform_alias()
+
+        if self._is_tenant_app(app_label):
+            return self._resolve_tenant_alias()
+
+        return self._platform_alias()
 
     def allow_relation(self, obj1, obj2, **hints):
-        db1 = getattr(obj1._state, "db", None)
-        db2 = getattr(obj2._state, "db", None)
-
-        if not db1 or not db2:
-            return None
+        db1 = obj1._state.db or self.db_for_read(obj1.__class__, instance=obj1)
+        db2 = obj2._state.db or self.db_for_read(obj2.__class__, instance=obj2)
 
         if db1 == db2:
             return True
@@ -37,41 +92,10 @@ class PlatformTenantRouter:
         return False
 
     def allow_migrate(self, db, app_label, model_name=None, **hints):
-        platform_app_labels = set(getattr(settings, "PLATFORM_APP_LABELS", set()))
-        tenant_app_labels = set(getattr(settings, "TENANT_APP_LABELS", set()))
-        platform_db_alias = getattr(settings, "MULTI_TENANCY_PLATFORM_DB_ALIAS", "default")
-        tenant_prefix = getattr(settings, "MULTI_TENANCY_TENANT_DB_ALIAS_PREFIX", "tenant_")
+        if self._is_platform_app(app_label):
+            return db == self._platform_alias()
 
-        if app_label in platform_app_labels:
-            return db == platform_db_alias
+        if self._is_tenant_app(app_label):
+            return db.startswith(self._tenant_prefix())
 
-        if app_label in tenant_app_labels:
-            return db != platform_db_alias and db.startswith(tenant_prefix)
-
-        return None
-
-    def _route_model(self, model):
-        app_label = model._meta.app_label
-
-        platform_app_labels = set(getattr(settings, "PLATFORM_APP_LABELS", set()))
-        tenant_app_labels = set(getattr(settings, "TENANT_APP_LABELS", set()))
-        platform_db_alias = getattr(settings, "MULTI_TENANCY_PLATFORM_DB_ALIAS", "default")
-        strict_routing = getattr(settings, "MULTI_TENANCY_STRICT_ROUTING", True)
-
-        if app_label in platform_app_labels:
-            return platform_db_alias
-
-        if app_label in tenant_app_labels:
-            alias = get_current_tenant_alias(required=False)
-
-            if alias:
-                return alias
-
-            if strict_routing:
-                raise TenantContextMissingError(
-                    f"No hay tenant activo para enrutar el modelo '{model.__name__}'."
-                )
-
-            return platform_db_alias
-
-        return None
+        return db == self._platform_alias()

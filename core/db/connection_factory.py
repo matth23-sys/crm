@@ -1,88 +1,105 @@
-# backend/core/db/connection_factory.py
-
 from __future__ import annotations
 
 import re
 from copy import deepcopy
-from typing import Any
+from typing import Any, Mapping
 
 from django.conf import settings
 
-from .exceptions import TenantDatabaseConfigurationError
+from .exceptions import TenantConnectionConfigurationError
 
 
-def _read_tenant_value(tenant: Any, key: str, default=None):
-    if isinstance(tenant, dict):
-        return tenant.get(key, default)
-    return getattr(tenant, key, default)
+_ALIAS_SANITIZER_RE = re.compile(r"[^a-zA-Z0-9_]+")
+
+TENANT_IDENTIFIER_ATTRS = ("db_alias", "slug", "uuid", "code", "id")
+TENANT_DB_NAME_ATTRS = ("db_name", "database_name", "dbname")
+TENANT_DB_USER_ATTRS = ("db_user", "database_user")
+TENANT_DB_PASSWORD_ATTRS = ("db_password", "database_password")
+TENANT_DB_HOST_ATTRS = ("db_host", "database_host")
+TENANT_DB_PORT_ATTRS = ("db_port", "database_port")
+TENANT_DB_OPTIONS_ATTRS = ("db_options", "database_options")
+TENANT_DB_TEST_NAME_ATTRS = ("db_test_name", "database_test_name")
 
 
-def _sanitize_alias_part(value: str) -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9_]+", "_", value.strip().lower())
-    cleaned = cleaned.strip("_")
+def _get_value(source: Any, keys: tuple[str, ...], default: Any = None) -> Any:
+    if isinstance(source, Mapping):
+        for key in keys:
+            value = source.get(key)
+            if value not in (None, ""):
+                return value
+        return default
 
-    if not cleaned:
-        raise TenantDatabaseConfigurationError(
-            "No se pudo construir un alias válido para la base de datos del tenant."
-        )
+    for key in keys:
+        value = getattr(source, key, None)
+        if value not in (None, ""):
+            return value
+    return default
 
-    return cleaned
+
+def sanitize_alias(raw_alias: str) -> str:
+    alias = _ALIAS_SANITIZER_RE.sub("_", str(raw_alias).strip().lower()).strip("_")
+    if not alias:
+        raise TenantConnectionConfigurationError("The generated tenant db alias is empty.")
+    return alias
 
 
 def build_tenant_db_alias(tenant: Any) -> str:
-    prefix = getattr(settings, "MULTI_TENANCY_TENANT_DB_ALIAS_PREFIX", "tenant_")
-
-    raw_identifier = (
-        _read_tenant_value(tenant, "db_alias")
-        or _read_tenant_value(tenant, "slug")
-        or _read_tenant_value(tenant, "subdomain")
-        or _read_tenant_value(tenant, "schema_name")
-        or _read_tenant_value(tenant, "id")
-    )
+    prefix = settings.MULTI_TENANCY_TENANT_DB_ALIAS_PREFIX
+    raw_identifier = _get_value(tenant, TENANT_IDENTIFIER_ATTRS)
 
     if raw_identifier in (None, ""):
-        raise TenantDatabaseConfigurationError(
-            "El tenant no tiene un identificador utilizable para construir db alias."
+        raise TenantConnectionConfigurationError(
+            "Unable to build tenant db alias. Expected one of: "
+            f"{', '.join(TENANT_IDENTIFIER_ATTRS)}"
         )
 
-    return f"{prefix}{_sanitize_alias_part(str(raw_identifier))}"
+    raw_identifier = str(raw_identifier)
+    if raw_identifier.startswith(prefix):
+        return sanitize_alias(raw_identifier)
+
+    return sanitize_alias(f"{prefix}{raw_identifier}")
 
 
-def build_tenant_database_config(tenant: Any) -> dict:
-    default_engine = "django.db.backends.postgresql"
-    default_host = "127.0.0.1"
-    default_port = "5432"
-
-    engine = _read_tenant_value(tenant, "db_engine", default_engine)
-    name = _read_tenant_value(tenant, "db_name")
-    user = _read_tenant_value(tenant, "db_user")
-    password = _read_tenant_value(tenant, "db_password")
-    host = _read_tenant_value(tenant, "db_host", default_host)
-    port = str(_read_tenant_value(tenant, "db_port", default_port))
-    options = deepcopy(_read_tenant_value(tenant, "db_options", {}) or {})
-    conn_max_age = int(_read_tenant_value(tenant, "db_conn_max_age", 60))
-
-    missing = []
-    if not name:
-        missing.append("db_name")
-    if not user:
-        missing.append("db_user")
-    if password is None:
-        missing.append("db_password")
-
-    if missing:
-        raise TenantDatabaseConfigurationError(
-            f"Faltan campos requeridos de conexión tenant: {', '.join(missing)}."
+def build_tenant_db_config(tenant: Any) -> dict[str, Any]:
+    template = deepcopy(getattr(settings, "MULTI_TENANCY_TENANT_DB_TEMPLATE", {}))
+    if not template:
+        raise TenantConnectionConfigurationError(
+            "MULTI_TENANCY_TENANT_DB_TEMPLATE is not configured in settings."
         )
 
-    return {
-        "ENGINE": engine,
-        "NAME": name,
-        "USER": user,
-        "PASSWORD": password,
-        "HOST": host,
-        "PORT": port,
-        "ATOMIC_REQUESTS": True,
-        "CONN_MAX_AGE": conn_max_age,
-        "OPTIONS": options,
+    db_name = _get_value(tenant, TENANT_DB_NAME_ATTRS, default=template.get("NAME"))
+    if not db_name:
+        raise TenantConnectionConfigurationError(
+            "Unable to build tenant DB config. Missing tenant database name."
+        )
+
+    config = deepcopy(template)
+    config["NAME"] = db_name
+
+    overrides = {
+        "USER": _get_value(tenant, TENANT_DB_USER_ATTRS),
+        "PASSWORD": _get_value(tenant, TENANT_DB_PASSWORD_ATTRS),
+        "HOST": _get_value(tenant, TENANT_DB_HOST_ATTRS),
+        "PORT": _get_value(tenant, TENANT_DB_PORT_ATTRS),
     }
+
+    for key, value in overrides.items():
+        if value not in (None, ""):
+            config[key] = value
+
+    db_options = _get_value(tenant, TENANT_DB_OPTIONS_ATTRS)
+    if isinstance(db_options, Mapping):
+        config["OPTIONS"] = {
+            **config.get("OPTIONS", {}),
+            **dict(db_options),
+        }
+
+    db_test_name = _get_value(tenant, TENANT_DB_TEST_NAME_ATTRS)
+    if db_test_name:
+        config.setdefault("TEST", {})
+        config["TEST"]["NAME"] = db_test_name
+
+    config.setdefault("CONN_MAX_AGE", 0)
+    config.setdefault("CONN_HEALTH_CHECKS", False)
+
+    return config

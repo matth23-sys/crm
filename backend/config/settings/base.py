@@ -1,5 +1,8 @@
 # backend/config/settings/base.py
+from __future__ import annotations
 
+import os
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -336,4 +339,117 @@ TENANT_APP_LABELS = {
     "media_assets",
     "notifications",
     "auditlog",
+} 
+
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+PROJECT_ROOT = BACKEND_DIR.parent
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    return int(os.getenv(name, str(default)))
+
+
+DJANGO_APPS = [
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+]
+
+THIRD_PARTY_APPS = [
+    "rest_framework",
+]
+
+PLATFORM_APPS = [
+    "apps.platform.tenants",
+    "apps.platform.subscriptions",
+    "apps.platform.platform_accounts",
+    "apps.platform.provisioning",
+]
+
+TENANT_APPS = [
+    "apps.tenant.accounts",
+    "apps.tenant.employees",
+    "apps.tenant.clients",
+    "apps.tenant.service_catalog",
+    "apps.tenant.workorders",
+    "apps.tenant.reports",
+    "apps.tenant.billing",
+    "apps.tenant.assignments",
+    "apps.tenant.media_assets",
+    "apps.tenant.notifications",
+    "apps.tenant.auditlog",
+]
+
+INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + PLATFORM_APPS + TENANT_APPS
+
+
+MULTI_TENANCY_PLATFORM_DB_ALIAS = "default"
+MULTI_TENANCY_TENANT_DB_ALIAS_PREFIX = os.getenv("MULTI_TENANCY_TENANT_DB_ALIAS_PREFIX", "tenant_")
+MULTI_TENANCY_STRICT_ROUTING = env_bool("MULTI_TENANCY_STRICT_ROUTING", True)
+
+PLATFORM_APP_LABELS = {
+    "tenants",
+    "subscriptions",
+    "platform_accounts",
+    "provisioning",
 }
+
+TENANT_APP_LABELS = {
+    "accounts",
+    "employees",
+    "clients",
+    "service_catalog",
+    "workorders",
+    "reports",
+    "billing",
+    "assignments",
+    "media_assets",
+    "notifications",
+    "auditlog",
+}
+
+MULTI_TENANCY_PLATFORM_SYSTEM_APP_LABELS = {
+    "admin",
+    "auth",
+    "contenttypes",
+    "sessions",
+}
+
+DATABASES = {
+    "default": {
+        "ENGINE": os.getenv("PLATFORM_DB_ENGINE", "django.db.backends.postgresql"),
+        "NAME": os.getenv("PLATFORM_DB_NAME", "crm_platform"),
+        "USER": os.getenv("PLATFORM_DB_USER", "postgres"),
+        "PASSWORD": os.getenv("PLATFORM_DB_PASSWORD", "postgres"),
+        "HOST": os.getenv("PLATFORM_DB_HOST", "127.0.0.1"),
+        "PORT": os.getenv("PLATFORM_DB_PORT", "5432"),
+        "CONN_MAX_AGE": env_int("PLATFORM_DB_CONN_MAX_AGE", 0),
+        "CONN_HEALTH_CHECKS": env_bool("PLATFORM_DB_CONN_HEALTH_CHECKS", False),
+    },
+}
+
+MULTI_TENANCY_TENANT_DB_TEMPLATE = {
+    "ENGINE": os.getenv("TENANT_DB_ENGINE", "django.db.backends.postgresql"),
+    "USER": os.getenv("TENANT_DB_USER", "postgres"),
+    "PASSWORD": os.getenv("TENANT_DB_PASSWORD", "postgres"),
+    "HOST": os.getenv("TENANT_DB_HOST", "127.0.0.1"),
+    "PORT": os.getenv("TENANT_DB_PORT", "5432"),
+    "CONN_MAX_AGE": env_int("TENANT_DB_CONN_MAX_AGE", 0),
+    "CONN_HEALTH_CHECKS": env_bool("TENANT_DB_CONN_HEALTH_CHECKS", False),
+    "OPTIONS": {},
+}
+
+DATABASE_ROUTERS = [
+    "core.db.routers.MultiTenantDatabaseRouter",
+]

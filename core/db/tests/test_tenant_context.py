@@ -32,3 +32,6 @@ class TenantContextTests(SimpleTestCase):
         self.assertFalse(has_current_tenant())
         self.assertIsNone(get_current_tenant())
         self.assertIsNone(get_current_tenant_alias())
+
+
+        

@@ -1,61 +1,78 @@
-# backend/core/db/registry.py
-
 from __future__ import annotations
 
+import logging
+from typing import Any
+
 from django.conf import settings
-from django.db import connections
+from django.db import close_old_connections, connections
 
-from .connection_factory import (
-    build_tenant_database_config,
-    build_tenant_db_alias,
+from .connection_factory import build_tenant_db_alias, build_tenant_db_config
+from .exceptions import (
+    TenantConnectionNotRegisteredError,
+    TenantConnectionRegistrationError,
 )
-from .exceptions import TenantDatabaseRegistrationError
+
+logger = logging.getLogger(__name__)
 
 
-def is_database_registered(alias: str) -> bool:
-    return alias in settings.DATABASES
+def is_connection_registered(alias: str) -> bool:
+    return alias in connections.databases
 
 
-def register_tenant_database(
-    tenant,
-    *,
-    alias: str | None = None,
-    overwrite: bool = False,
-) -> str:
-    db_alias = alias or build_tenant_db_alias(tenant)
-    default_alias = getattr(settings, "MULTI_TENANCY_PLATFORM_DB_ALIAS", "default")
+def register_tenant_connection(tenant: Any, *, overwrite: bool = False) -> str:
+    alias = build_tenant_db_alias(tenant)
+    db_config = build_tenant_db_config(tenant)
 
-    if db_alias == default_alias:
-        raise TenantDatabaseRegistrationError(
-            "El alias del tenant no puede ser igual al alias de plataforma."
+    if is_connection_registered(alias) and not overwrite:
+        return alias
+
+    if is_connection_registered(alias) and overwrite:
+        close_connection(alias, forget_alias=False)
+
+    connections.databases[alias] = db_config
+    settings.DATABASES[alias] = db_config
+
+    logger.debug("Tenant db connection registered: alias=%s", alias)
+    return alias
+
+
+def get_connection_settings(alias: str) -> dict:
+    if alias not in connections.databases:
+        raise TenantConnectionNotRegisteredError(
+            f"Tenant connection alias '{alias}' is not registered."
+        )
+    return connections.databases[alias]
+
+
+def close_connection(alias: str, *, forget_alias: bool = False) -> None:
+    if alias not in connections.databases and not forget_alias:
+        raise TenantConnectionNotRegisteredError(
+            f"Tenant connection alias '{alias}' is not registered."
         )
 
-    if is_database_registered(db_alias) and not overwrite:
-        return db_alias
+    if alias in connections.databases:
+        connection = connections[alias]
+        connection.close()
 
-    db_config = build_tenant_database_config(tenant)
+        # Django cachea wrappers de conexión internamente.
+        # Centralizamos aquí ese detalle para no dispersar acoplamiento interno.
+        storage = getattr(connections, "_connections", None)
+        if storage is not None and hasattr(storage, alias):
+            delattr(storage, alias)
 
-    settings.DATABASES[db_alias] = db_config
-    connections.databases[db_alias] = db_config
+    if forget_alias:
+        connections.databases.pop(alias, None)
+        settings.DATABASES.pop(alias, None)
 
-    return db_alias
+    close_old_connections()
 
 
-def unregister_tenant_database(alias: str, *, close_connection: bool = True) -> None:
-    default_alias = getattr(settings, "MULTI_TENANCY_PLATFORM_DB_ALIAS", "default")
-
-    if alias == default_alias:
-        raise TenantDatabaseRegistrationError(
-            "No se puede remover el alias de la base principal de plataforma."
+def unregister_tenant_connection(alias: str) -> None:
+    platform_alias = settings.MULTI_TENANCY_PLATFORM_DB_ALIAS
+    if alias == platform_alias:
+        raise TenantConnectionRegistrationError(
+            f"Refusing to unregister the platform database alias '{platform_alias}'."
         )
 
-    try:
-        if close_connection and alias in connections:
-            connections[alias].close()
-    except Exception as exc:
-        raise TenantDatabaseRegistrationError(
-            f"No se pudo cerrar la conexión para el alias '{alias}'."
-        ) from exc
-
-    settings.DATABASES.pop(alias, None)
-    connections.databases.pop(alias, None)
+    close_connection(alias, forget_alias=True)
+    logger.debug("Tenant db connection unregistered: alias=%s", alias)

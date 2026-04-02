@@ -6,7 +6,15 @@ It exposes the ASGI callable as a module-level variable named ``application``.
 For more information on this file, see
 https://docs.djangoproject.com/en/6.0/howto/deployment/asgi/
 """
+from pathlib import Path
+import sys
 
+CURRENT_FILE = Path(__file__).resolve()
+BACKEND_DIR = CURRENT_FILE.parent if CURRENT_FILE.name == "manage.py" else CURRENT_FILE.parent.parent
+PROJECT_ROOT = BACKEND_DIR.parent
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 # backend/config/asgi.py
 
 import os
